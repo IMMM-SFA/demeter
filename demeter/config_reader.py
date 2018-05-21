@@ -77,6 +77,7 @@ class ReadConfig:
         # create and validate reference input file full paths
         r = i['REFERENCE']
         self.gcam_regnamefile = self.check_exist(os.path.join(self.ref_dir, r['gcam_regnamefile']), 'file', self.log)
+        self.gcam_bsnnamefile = self.check_exist(os.path.join(self.ref_dir, r['gcam_bsnnamefile']), 'file', self.log)
         self.region_coords = self.check_exist(os.path.join(self.ref_dir, r['region_coords']), 'file', self.log)
         self.country_coords = self.check_exist(os.path.join(self.ref_dir, r['country_coords']), 'file', self.log)
 
@@ -105,6 +106,16 @@ class ReadConfig:
         # assign and type run specific parameters
         p = self.config['PARAMS']
         self.model = self.ck_len(p['model'], 'model')
+
+        # if getting input directly from GCAM database
+        try:
+            db_path_ = p['db_path']
+            self.db_path = self.check_exist(db_path_, 'dir', self.log)
+            self.db_queries = self.check_exist(p['db_queries'], 'file', self.log)
+            self.crop_water_src = self.ck_vals(p['crop_water_src'].upper(), 'crop_water_src', ['IRR', 'RFD', 'BOTH'])
+        except KeyError:
+            self.db_path = None
+
         self.metric = self.ck_vals(p['metric'].upper(), 'metric', ['BASIN', 'AEZ'])
         self.run_desc = self.ck_len(p['run_desc'], 'run_desc')
         self.use_constraints = self.ck_vals(int(p['use_constraints']), 'use_constraints', [0, 1])
@@ -565,12 +576,23 @@ class ReadConfigShuffle:
         # create and validate reference input file full paths
         r = i['REFERENCE']
         self.gcam_regnamefile = self.check_exist(os.path.join(self.ref_dir, r['gcam_regnamefile']), 'file', self.log)
+        self.gcam_bsnnamefile = self.check_exist(os.path.join(self.ref_dir, r['gcam_bsnnamefile']), 'file', self.log)
         self.region_coords = self.check_exist(os.path.join(self.ref_dir, r['region_coords']), 'file', self.log)
         self.country_coords = self.check_exist(os.path.join(self.ref_dir, r['country_coords']), 'file', self.log)
 
         # assign and type run specific parameters
         p = self.config['PARAMS']
         self.model = self.ck_len(p['model'], 'model')
+
+        # if getting input directly from GCAM database
+        try:
+            db_path_ = p['db_path']
+            self.db_path = self.check_exist(db_path_, 'dir', self.log)
+            self.db_queries = self.check_exist(p['db_queries'], 'file', self.log)
+            self.crop_water_src = self.ck_vals(p['crop_water_src'].upper(), 'crop_water_src', ['IRR', 'RFD', 'BOTH'])
+        except KeyError:
+            self.db_path = None
+
         self.metric = self.ck_vals(p['metric'].upper(), 'metric', ['BASIN', 'AEZ'])
         self.run_desc = self.ck_len(p['run_desc'], 'run_desc')
         self.use_constraints = self.ck_vals(int(p['use_constraints']), 'use_constraints', [0, 1])

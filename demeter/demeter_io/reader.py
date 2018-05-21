@@ -10,9 +10,10 @@ Open source under license BSD 2-Clause - see LICENSE and DISCLAIMER
 import numpy as np
 import os
 import pandas as pd
+import gcam_reader
 
 
-def to_dict(f, header=False, delim=',', swap=False):
+def to_dict(f, header=False, delim=',', swap=False, value_col=1):
     """
     Return a dictionary of key: value pairs.  Supports only key to one value.
 
@@ -20,6 +21,7 @@ def to_dict(f, header=False, delim=',', swap=False):
     :param header:      If header exists True, else False (default)
     :param delim:       Set delimiter as string; default is comma
     :param swap:        Change the order of the key, value pair
+    :param value_col:   Column index of dict values (or keys if swap is True)
     :return:            Key: value pair dictionary
     """
     d = {}
@@ -35,9 +37,9 @@ def to_dict(f, header=False, delim=',', swap=False):
 
             # add key: value pair to dict
             if swap:
-                d[item[1]] = item[0]
+                d[item[value_col]] = item[0]
             else:
-                d[item[0]] = item[1]
+                d[item[0]] = item[value_col]
 
     return d
 
@@ -176,17 +178,89 @@ def _get_steps(df, start_step, end_step):
     return l
 
 
-def read_gcam_file(log, f, gcam_landclasses, start_yr, end_yr, scenario, region_dict, agg_level, area_factor=1000):
+def read_gcam_land(db_path, f_queries, d_basin_name, subreg, crop_water_src):
     """
-    Read and process the GCAM land allocation output file.
+    Query GCAM database for irrigated land area per region, subregion, and crop type.
 
-    :param f:                   GCAM land allocation file
-    :param name_col:            Field name of the column containing the region and either AEZ or basin number
-    :param metric:              AEZ or Basin
+    :param db_path:         Full path to the input GCAM database
+    :param f_queries:       Full path to the XML query file
+    :param d_basin_name:    A dictionary of 'basin_glu_name' : basin_id
+    :param subreg:          Agg level of GCAM database: either AEZ or BASIN
+    :param crop_water_src:  Filter for crop type: one of IRR, RFD, or BOTH
+    :return:                A pandas DataFrame containing region, subregion,
+                            crop type, and irrigated area per year in thousands
+                            km2
+    """
+
+    # instantiate GCAM db
+    db_file = os.path.basename(db_path)
+    db_path = os.path.dirname(db_path)
+    conn = gcam_reader.LocalDBConn(db_path, db_file, suppress_gabble=False)
+
+    # get queries
+    q = gcam_reader.parse_batch_query(f_queries)
+
+    # assume target query is first in query list
+    land_alloc = conn.runQuery(q[0])
+
+    # split 'land-allocation' column into components
+    if subreg == 'AEZ':
+        # expected format: landclassAEZ##USE
+        cnames = ['landclass', 'metric_id']
+        land_alloc[cnames] = land_alloc['land-allocation'].str.split('AEZ', expand=True)
+        land_alloc['use'] = land_alloc['metric_id'].str[-3:]
+        land_alloc['metric_id'] = land_alloc['metric_id'].str[:2]
+
+    elif subreg == 'BASIN':
+        # expected format: landclass_basin-glu-name_USE_management
+        cnames = ['landclass', 'metric_id', 'use', 'mgmt']
+
+        # clean data: simplify biomass_type to just 'biomass'; temporarily
+        # change Root_Tuber to RootTuber so we can split on underscores
+        land_alloc['land-allocation'].replace(r'^biomass_[^_]*_', r'biomass_', regex=True, inplace=True)
+        land_alloc['land-allocation'] = land_alloc['land-allocation'].str.replace('Root_Tuber', 'RootTuber')
+        land_alloc[cnames] = land_alloc['land-allocation'].str.split('_', expand=True)
+        land_alloc['landclass'] = land_alloc['landclass'].str.replace('RootTuber', 'Root_Tuber')
+
+        land_alloc['metric_id'] = land_alloc['metric_id'].map(d_basin_name)
+        land_alloc.drop('mgmt', axis=1, inplace=True)
+
+    # filter out irrigated or rainfed crops, as specified in the config file
+    if crop_water_src != 'BOTH':
+        land_alloc = land_alloc[land_alloc['use'] == crop_water_src]
+
+    # drop unused columns
+    land_alloc.drop(['Units', 'scenario', 'land-allocation', 'use'], axis=1, inplace=True)
+
+    # sum hi and lo management allocation (and biomass_type)
+    land_alloc = land_alloc.groupby(['region', 'landclass', 'metric_id', 'Year']).sum()
+    land_alloc.reset_index(inplace=True)
+
+    # convert shape
+    piv = pd.pivot_table(land_alloc, values='value',
+                         index=['region', 'landclass', 'metric_id'],
+                         columns='Year', fill_value=0)
+    piv.reset_index(inplace=True)
+    piv.columns = piv.columns.astype(str)
+
+    return piv
+
+
+def read_gcam(log, f, gcam_landclasses, start_yr, end_yr, scenario, region_dict,
+              agg_level, area_factor=1000):
+    """
+    Read and process GCAM land allocation output.
+
+    :param log:                 Logger object
+    :param f:                   GCAM land allocation pandas DataFrame or .csv file name
+    :param gcam_landclasses     Allowed landclass categories
     :param start_yr:            User-defined GCAM start year to process from configuration file
     :param end_yr:              User-defined GCAM end year to process from configuration file
-    :param scenario:            GCAM scenario name contained in file that the user wishes to process; set in config.ini
+    :param scenario:            GCAM scenario name contained in file that the user wishes to
+                                process; set in config.ini
     :param region_dict:         The reference dictionary for GCAM region_name: region_id
+    :param agg_level:           Aggregate level; 1 if input has no region information, 2 if it
+                                is by both region and AEZ or basin; set in config.ini
     :param area_factor:         The factor that will be a multiplier to the land use area that is in thousands km
     :return:                    A list of the following (represents the target user-defined scenario):
                                     user_years:             a list of target GCAM years as int
@@ -199,8 +273,9 @@ def read_gcam_file(log, f, gcam_landclasses, start_yr, end_yr, scenario, region_
                                     allregaez:              List of lists, metric ids per region
     """
 
-    # read GCAM output file as a dataframe; skip title row
-    gdf = pd.read_csv(f, header=0)
+    # if land allocation data is not already a DataFrame, read GCAM output file
+    # and skip title row
+    gdf = f if isinstance(f, pd.DataFrame) else pd.read_csv(f, header=0)
 
     # make sure all land classes in the projected file are in the allocation file and vice versa
     _check_constraints(log, gcam_landclasses, gdf['landclass'].tolist())
@@ -232,7 +307,7 @@ def read_gcam_file(log, f, gcam_landclasses, start_yr, end_yr, scenario, region_
         gdf['gcam_regionnumber'] = gdf['region'].map(lambda x: int(region_dict[x]))
 
     # create an array of AEZ or Basin positions
-    gcam_metric  = gdf['gcam_metric'].as_matrix()
+    gcam_metric = gdf['gcam_metric'].as_matrix()
 
     # create an array of AEZ or Basin ids; formerly gcam_aez; this has the original metric values - not sequential
     metric_id_array = gdf['metric_id'].as_matrix()
